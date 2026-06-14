@@ -1,0 +1,36 @@
+# binaries
+notorch_test
+notorch_test_gpu
+infer_gemma
+infer_janus_nt
+infer_llama
+test_gguf
+train_q
+train_yent
+chat_yent
+train_janus_sonar
+infer_janus_sonar
+train_dubrovsky
+train_dubrovsky_dbg
+train_nanodurov
+infer_nanodurov
+train_dpo
+train_grpo
+train_distillation
+test_sigmoid_scale
+test_vision
+*.dSYM
+
+# build artifacts
+*.o
+*.a
+
+# weights & checkpoints
+*.bin
+*.ckpt
+*.meta
+
+# logs
+*.log
+infer_janus_sonar_chain
+nanodurov.html

@@ -1,0 +1,370 @@
+/*
+ * train_doe.c — Train a 9.8M LLaMA-like transformer on the unified DoE corpus
+ *
+ * Architecture: V=256, E=224, H=8, FFN=896, CTX=128, L=12  (char-level, byte vocab)
+ * Dataset:      /Users/ataeff/DoE.aml/datasets/doe_corpus.txt (4.23 MB,
+ *               6327 dialogs in <|user|>...<|assistant|>...<|end|> form,
+ *               parliament voice from doe_pure + doe_resonate + doe_addition)
+ * Optimizer:    Chuck (synced with PyTorch reference)
+ *
+ * Build: make train_doe
+ * Run:   ./train_doe [steps] [lr]
+ *        ./train_doe --resume [steps] [lr]   (continue from doe_ckpt.bin)
+ *
+ * Outputs:
+ *   doe_ckpt.bin   running checkpoint (each CKPT_EVERY steps)
+ *   doe_ckpt.meta  step + best_loss
+ *   doe_best.bin   best val checkpoint
+ *   doe_10m.bin    final weights at end of run
+ */
+
+#include "notorch.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/time.h>
+
+#define V     256
+#define EMB   224
+#define HEADS 8
+#define HD    (EMB / HEADS)  // 28
+#define FFN_D 896
+#define CTX   128
+#define NLAYERS 12
+
+#define CKPT_EVERY  1000
+#define EVAL_SEQS   32
+#define LOG_EVERY   100
+#define BEST_PREFIX "doe_best"
+#define CKPT_PREFIX "doe_ckpt"
+
+typedef struct {
+    nt_tensor *wte, *wpe;
+    struct {
+        nt_tensor *rms1, *wq, *wk, *wv, *wo;
+        nt_tensor *rms2, *w_gate, *w_up, *w_down;
+    } L[NLAYERS];
+    nt_tensor *rms_f, *head;
+} Model;
+
+static long count_params(Model* m) {
+    long n = m->wte->len + m->wpe->len + m->rms_f->len + m->head->len;
+    for (int l = 0; l < NLAYERS; l++) {
+        n += m->L[l].rms1->len + m->L[l].rms2->len;
+        n += m->L[l].wq->len + m->L[l].wk->len + m->L[l].wv->len + m->L[l].wo->len;
+        n += m->L[l].w_gate->len + m->L[l].w_up->len + m->L[l].w_down->len;
+    }
+    return n;
+}
+
+static Model* model_new(void) {
+    Model* m = (Model*)calloc(1, sizeof(Model));
+    m->wte = nt_tensor_new2d(V, EMB); nt_tensor_xavier(m->wte, V, EMB);
+    m->wpe = nt_tensor_new2d(CTX, EMB); nt_tensor_xavier(m->wpe, CTX, EMB);
+    float res_scale = 0.02f / sqrtf(2.0f * NLAYERS);
+    for (int l = 0; l < NLAYERS; l++) {
+        m->L[l].rms1 = nt_tensor_new(EMB); nt_tensor_fill(m->L[l].rms1, 1.0f);
+        m->L[l].wq = nt_tensor_new2d(EMB, EMB); nt_tensor_xavier(m->L[l].wq, EMB, EMB);
+        m->L[l].wk = nt_tensor_new2d(EMB, EMB); nt_tensor_xavier(m->L[l].wk, EMB, EMB);
+        m->L[l].wv = nt_tensor_new2d(EMB, EMB); nt_tensor_xavier(m->L[l].wv, EMB, EMB);
+        m->L[l].wo = nt_tensor_new2d(EMB, EMB); nt_tensor_xavier(m->L[l].wo, EMB, EMB);
+        for (int i = 0; i < m->L[l].wo->len; i++) m->L[l].wo->data[i] *= res_scale / 0.1f;
+        m->L[l].rms2 = nt_tensor_new(EMB); nt_tensor_fill(m->L[l].rms2, 1.0f);
+        m->L[l].w_gate = nt_tensor_new2d(FFN_D, EMB); nt_tensor_xavier(m->L[l].w_gate, EMB, FFN_D);
+        m->L[l].w_up = nt_tensor_new2d(FFN_D, EMB); nt_tensor_xavier(m->L[l].w_up, EMB, FFN_D);
+        m->L[l].w_down = nt_tensor_new2d(EMB, FFN_D); nt_tensor_xavier(m->L[l].w_down, FFN_D, EMB);
+        for (int i = 0; i < m->L[l].w_down->len; i++) m->L[l].w_down->data[i] *= res_scale / 0.1f;
+    }
+    m->rms_f = nt_tensor_new(EMB); nt_tensor_fill(m->rms_f, 1.0f);
+    m->head = nt_tensor_new2d(V, EMB); nt_tensor_xavier(m->head, EMB, V);
+    return m;
+}
+
+static void model_free(Model* m) {
+    nt_tensor_free(m->wte); nt_tensor_free(m->wpe);
+    for (int l = 0; l < NLAYERS; l++) {
+        nt_tensor_free(m->L[l].rms1); nt_tensor_free(m->L[l].rms2);
+        nt_tensor_free(m->L[l].wq); nt_tensor_free(m->L[l].wk);
+        nt_tensor_free(m->L[l].wv); nt_tensor_free(m->L[l].wo);
+        nt_tensor_free(m->L[l].w_gate); nt_tensor_free(m->L[l].w_up);
+        nt_tensor_free(m->L[l].w_down);
+    }
+    nt_tensor_free(m->rms_f); nt_tensor_free(m->head); free(m);
+}
+
+static int model_n_tensors(void) { return 2 + NLAYERS * 9 + 2; }
+
+static nt_tensor** model_param_array(Model* m) {
+    int n = model_n_tensors();
+    nt_tensor** p = (nt_tensor**)malloc(n * sizeof(nt_tensor*));
+    int i = 0;
+    p[i++] = m->wte; p[i++] = m->wpe;
+    for (int l = 0; l < NLAYERS; l++) {
+        p[i++]=m->L[l].rms1; p[i++]=m->L[l].wq; p[i++]=m->L[l].wk;
+        p[i++]=m->L[l].wv; p[i++]=m->L[l].wo; p[i++]=m->L[l].rms2;
+        p[i++]=m->L[l].w_gate; p[i++]=m->L[l].w_up; p[i++]=m->L[l].w_down;
+    }
+    p[i++] = m->rms_f; p[i++] = m->head;
+    return p;
+}
+
+static void save_model(Model* m, const char* prefix) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s.bin", prefix);
+    nt_tensor** p = model_param_array(m);
+    nt_save(path, p, model_n_tensors());
+    free(p);
+}
+
+static void save_checkpoint(Model* m, int step, float best_loss) {
+    save_model(m, CKPT_PREFIX);
+    char mpath[256];
+    snprintf(mpath, sizeof(mpath), "%s.meta", CKPT_PREFIX);
+    FILE* f = fopen(mpath, "w");
+    if (f) { fprintf(f, "%d\n%.6f\n", step, best_loss); fclose(f); }
+}
+
+static int load_checkpoint(Model* m, float* best_loss) {
+    char wpath[256], mpath[256];
+    snprintf(wpath, sizeof(wpath), "%s.bin", CKPT_PREFIX);
+    snprintf(mpath, sizeof(mpath), "%s.meta", CKPT_PREFIX);
+    int n_loaded = 0;
+    nt_tensor** loaded = nt_load(wpath, &n_loaded);
+    if (!loaded) return -1;
+    int expected = model_n_tensors();
+    if (n_loaded != expected) {
+        printf("  WARN: checkpoint has %d tensors, expected %d\n", n_loaded, expected);
+        for (int i = 0; i < n_loaded; i++) nt_tensor_free(loaded[i]);
+        free(loaded);
+        return -1;
+    }
+    nt_tensor** mp = model_param_array(m);
+    for (int i = 0; i < expected; i++) {
+        memcpy(mp[i]->data, loaded[i]->data, mp[i]->len * sizeof(float));
+        nt_tensor_free(loaded[i]);
+    }
+    free(loaded); free(mp);
+    int step = 0; *best_loss = 99.0f;
+    FILE* f = fopen(mpath, "r");
+    if (f) { fscanf(f, "%d\n%f\n", &step, best_loss); fclose(f); }
+    return step;
+}
+
+static int forward(Model* m, int* tokens, int* targets) {
+    int wte_i = nt_tape_param(m->wte); nt_tape_no_decay(wte_i);
+    int wpe_i = nt_tape_param(m->wpe); nt_tape_no_decay(wpe_i);
+    int li[NLAYERS][9];
+    for (int l = 0; l < NLAYERS; l++) {
+        li[l][0] = nt_tape_param(m->L[l].rms1);
+        li[l][1] = nt_tape_param(m->L[l].wq);
+        li[l][2] = nt_tape_param(m->L[l].wk);
+        li[l][3] = nt_tape_param(m->L[l].wv);
+        li[l][4] = nt_tape_param(m->L[l].wo);
+        li[l][5] = nt_tape_param(m->L[l].rms2);
+        li[l][6] = nt_tape_param(m->L[l].w_gate);
+        li[l][7] = nt_tape_param(m->L[l].w_up);
+        li[l][8] = nt_tape_param(m->L[l].w_down);
+    }
+    int rmsf_i = nt_tape_param(m->rms_f);
+    int head_i = nt_tape_param(m->head);
+
+    nt_tensor* tok_t = nt_tensor_new(CTX);
+    nt_tensor* tgt_t = nt_tensor_new(CTX);
+    for (int i = 0; i < CTX; i++) { tok_t->data[i] = (float)tokens[i]; tgt_t->data[i] = (float)targets[i]; }
+    int tok_i = nt_tape_record(tok_t, NT_OP_NONE, -1, -1, 0);
+    int tgt_i = nt_tape_record(tgt_t, NT_OP_NONE, -1, -1, 0);
+    nt_tensor_free(tok_t); nt_tensor_free(tgt_t);
+
+    int h = nt_seq_embedding(wte_i, wpe_i, tok_i, CTX, EMB);
+    for (int l = 0; l < NLAYERS; l++) {
+        int xn = nt_seq_rmsnorm(h, li[l][0], CTX, EMB);
+        int q = nt_seq_linear(li[l][1], xn, CTX);
+        int k = nt_seq_linear(li[l][2], xn, CTX);
+        int v = nt_seq_linear(li[l][3], xn, CTX);
+        int attn = nt_mh_causal_attention(q, k, v, CTX, HD);
+        int proj = nt_seq_linear(li[l][4], attn, CTX);
+        h = nt_add(h, proj);
+        xn = nt_seq_rmsnorm(h, li[l][5], CTX, EMB);
+        int gate = nt_silu(nt_seq_linear(li[l][6], xn, CTX));
+        int up = nt_seq_linear(li[l][7], xn, CTX);
+        int down = nt_seq_linear(li[l][8], nt_mul(gate, up), CTX);
+        h = nt_add(h, down);
+    }
+    int hf = nt_seq_rmsnorm(h, rmsf_i, CTX, EMB);
+    int logits = nt_seq_linear(head_i, hf, CTX);
+    return nt_seq_cross_entropy(logits, tgt_i, CTX, V);
+}
+
+static float eval_loss(Model* m, unsigned char* data, long fsize) {
+    float total = 0;
+    int count = 0;
+    long stride = fsize / EVAL_SEQS;
+    for (int s = 0; s < EVAL_SEQS; s++) {
+        long off = s * stride;
+        if (off + CTX + 1 > fsize) break;
+        int tokens[CTX], targets[CTX];
+        for (int i = 0; i < CTX; i++) { tokens[i] = data[off+i]; targets[i] = data[off+i+1]; }
+        nt_tape_start();
+        nt_train_mode(0);
+        int loss_idx = forward(m, tokens, targets);
+        total += nt_tape_get()->entries[loss_idx].output->data[0];
+        count++;
+        nt_tape_clear();
+        nt_train_mode(1);
+    }
+    return count > 0 ? total / count : 99.0f;
+}
+
+static double now_ms(void) { struct timeval tv; gettimeofday(&tv, NULL); return tv.tv_sec*1000.0+tv.tv_usec/1000.0; }
+
+int main(int argc, char** argv) {
+    int resume = 0;
+    int arg_off = 1;
+    if (argc > 1 && strcmp(argv[1], "--resume") == 0) { resume = 1; arg_off = 2; }
+    int steps = arg_off < argc ? atoi(argv[arg_off]) : 30000;
+    float base_lr = (arg_off+1) < argc ? (float)atof(argv[arg_off+1]) : 3e-4f;
+
+    printf("════════════════════════════════════════════════════════\n");
+    printf("  notorch — DoE 9.8M LLaMA training (parliament voice)\n");
+    printf("  V=%d E=%d H=%d FFN=%d CTX=%d L=%d\n", V, EMB, HEADS, FFN_D, CTX, NLAYERS);
+    printf("  Chuck optimizer, %d steps, lr=%.1e\n", steps, base_lr);
+    if (resume) printf("  RESUME MODE\n");
+    printf("  checkpoint every %d steps\n", CKPT_EVERY);
+    printf("════════════════════════════════════════════════════════\n");
+
+    const char* path = "/Users/ataeff/DoE.aml/datasets/doe_corpus.txt";
+    FILE* f = fopen(path, "rb");
+    if (!f) { printf("cannot open %s\n", path); return 1; }
+    fseek(f, 0, SEEK_END); long fsize = ftell(f); fseek(f, 0, SEEK_SET);
+    unsigned char* data = (unsigned char*)malloc(fsize);
+    fread(data, 1, fsize, f); fclose(f);
+    printf("corpus: %.1f MB (%ld bytes)\n", fsize/1048576.0, fsize);
+
+    nt_seed(42);
+    Model* model = model_new();
+    printf("model: %ld params (%.1f MB)\n", count_params(model), count_params(model)*4.0f/1048576.0f);
+
+    int start_step = 0;
+    float best_loss = 99.0f;
+
+    if (resume) {
+        int loaded_step = load_checkpoint(model, &best_loss);
+        if (loaded_step >= 0) {
+            start_step = loaded_step;
+            printf("  RESUMED from step %d, best_loss=%.4f\n", start_step, best_loss);
+        } else {
+            printf("  no checkpoint found, starting fresh\n");
+        }
+    }
+
+    nt_schedule sched = nt_schedule_cosine(base_lr, steps/10, steps, base_lr*0.1f);
+    sched.current_step = start_step;
+    nt_nan_guard guard = nt_nan_guard_new();
+
+    printf("\ntraining...\n");
+    printf("─────────────────────────────────────────────────────\n");
+    double t0 = now_ms();
+    float loss_ema = 0, first_loss = 0;
+
+    for (int step = start_step; step < steps; step++) {
+        float lr = nt_schedule_get_lr(&sched);
+        int off = rand() % (int)(fsize - CTX - 1);
+        int tokens[CTX], targets[CTX];
+        for (int i = 0; i < CTX; i++) { tokens[i] = data[off+i]; targets[i] = data[off+i+1]; }
+
+        nt_tape_start();
+        int loss_idx = forward(model, tokens, targets);
+        float lv = nt_tape_get()->entries[loss_idx].output->data[0];
+
+        if (step == start_step) { first_loss = lv; loss_ema = lv; }
+        else loss_ema = 0.95f * loss_ema + 0.05f * lv;
+
+        if (lv < best_loss) best_loss = lv;
+
+        nt_tape_backward(loss_idx);
+        if (!nt_nan_guard_check(&guard)) { nt_tape_clear(); continue; }
+        nt_tape_clip_grads(1.0f);
+        nt_tape_chuck_step(lr, lv);
+        nt_tape_clear();
+
+        if ((step+1) % LOG_EVERY == 0 || step == start_step) {
+            printf("  step %5d | train %.4f | ema %.4f | best %.4f | lr %.2e | %.1fs\n",
+                   step+1, lv, loss_ema, best_loss, lr, (now_ms()-t0)/1000.0);
+            fflush(stdout);
+        }
+
+        if ((step+1) % CKPT_EVERY == 0 && step > start_step) {
+            float val = eval_loss(model, data, fsize);
+            printf("  ──── ckpt %d | val %.4f | saving... ", step+1, val);
+            save_checkpoint(model, step+1, best_loss);
+            if (val < best_loss) {
+                best_loss = val;
+                save_model(model, BEST_PREFIX);
+                printf("★ new best!");
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+    }
+
+    float final_val = eval_loss(model, data, fsize);
+    double total_s = (now_ms()-t0)/1000.0;
+    int trained_steps = steps - start_step;
+
+    printf("─────────────────────────────────────────────────────\n");
+    printf("  train: %.4f → ema %.4f (best: %.4f)\n", first_loss, loss_ema, best_loss);
+    printf("  val:   %.4f\n", final_val);
+    printf("  time:  %.0fs (%.1f min) | %.2f steps/s\n", total_s, total_s/60.0, trained_steps/total_s);
+    printf("  nans:  %d\n", guard.total_nan_count);
+
+    printf("\n── generation (temp=0.8) ──\n");
+    nt_train_mode(0);
+    const char* prompts[] = {
+        "<|user|>Who are you?<|assistant|>",
+        "<|user|>What is the parliament?<|assistant|>",
+        "<|user|>Why are weights mortal?<|assistant|>",
+    };
+    for (int p = 0; p < 3; p++) {
+        int ctx[CTX]; int gen_len = 0;
+        const char* seed = prompts[p];
+        for (int i = 0; seed[i] && gen_len < CTX/2; i++) ctx[gen_len++] = (unsigned char)seed[i];
+        printf("%s", seed);
+        for (int s = 0; s < 120; s++) {
+            int tokens[CTX], targets[CTX];
+            for (int i = 0; i < gen_len; i++) tokens[i] = ctx[i];
+            for (int i = gen_len; i < CTX; i++) tokens[i] = 0;
+            memset(targets, 0, sizeof(targets));
+            nt_tape_start();
+            int loss_idx = forward(model, tokens, targets);
+            nt_tape* tape = nt_tape_get();
+            int logits_idx = tape->entries[loss_idx].parent1;
+            float* last = tape->entries[logits_idx].output->data + (gen_len-1)*V;
+            for (int i = 0; i < V; i++) last[i] /= 0.8f;
+            float mx = last[0]; for (int i=1;i<V;i++) if(last[i]>mx) mx=last[i];
+            float sm = 0; for (int i=0;i<V;i++) { last[i]=expf(last[i]-mx); sm+=last[i]; }
+            for (int i=0;i<V;i++) last[i]/=sm;
+            float r=(float)rand()/(float)RAND_MAX, cum=0; int next=0;
+            for (int i=0;i<V;i++) { cum+=last[i]; if(cum>=r){next=i;break;} }
+            char c = (char)next;
+            if (c >= 32 && c < 127) printf("%c", c);
+            else if (c == '\n') printf(" ");
+            else printf(".");
+            fflush(stdout);
+            ctx[gen_len++] = next;
+            nt_tape_clear();
+            if (gen_len >= CTX - 1) break;
+        }
+        printf("\n\n");
+    }
+
+    printf("── saving ──\n");
+    save_model(model, "doe_10m");
+    printf("  doe_10m.bin (%.1f MB)\n", count_params(model)*4.0f/1048576.0f);
+    save_checkpoint(model, steps, best_loss);
+    printf("  checkpoint saved (step %d)\n", steps);
+
+    model_free(model); free(data);
+    printf("\n════════════════════════════════════════════════════════\n");
+    printf("  DoE 9.8M trained. %d steps. Parliament is eternal.\n", steps);
+    printf("════════════════════════════════════════════════════════\n");
+    return 0;
+}

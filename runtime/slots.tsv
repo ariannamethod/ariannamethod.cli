@@ -1,0 +1,3 @@
+slot	label	kind	state	target	notes
+heart	dario-heart	baked	wired	dario/dario	Live resonance kernel and SARTRE chambers.
+nanollama	nanollama-trainer	repo	wired	examples/nanollama/nanollama	Vendored notorch-backed Llama 3 style trainer.

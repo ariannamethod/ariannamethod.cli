@@ -1,0 +1,40 @@
+{
+  "name": "metaharmonix-codex",
+  "version": "0.1.0",
+  "description": "Codex-side helper plugin for metaharmonix line protocol and local terminal orchestration.",
+  "author": {
+    "name": "Arianna Method",
+    "email": "noreply@ariannamethod.ai",
+    "url": "https://github.com/ariannamethod/metaharmonix"
+  },
+  "homepage": "https://github.com/ariannamethod/metaharmonix",
+  "repository": "https://github.com/ariannamethod/metaharmonix",
+  "license": "MIT",
+  "keywords": [
+    "metaharmonix",
+    "aml",
+    "notorch",
+    "terminal"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Metaharmonix",
+    "shortDescription": "Local AML + notorch terminal companion",
+    "longDescription": "Repo-local Codex plugin scaffold for talking to metaharmonix via mhx -c and the documented line protocol.",
+    "developerName": "Arianna Method",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ariannamethod/metaharmonix",
+    "privacyPolicyURL": "https://github.com/ariannamethod/metaharmonix",
+    "termsOfServiceURL": "https://github.com/ariannamethod/metaharmonix",
+    "defaultPrompt": [
+      "Inspect mhx status and baked tool availability.",
+      "Run an AML file through mhx aml run.",
+      "Check notorch and heart status in metaharmonix."
+    ],
+    "brandColor": "#111111"
+  }
+}

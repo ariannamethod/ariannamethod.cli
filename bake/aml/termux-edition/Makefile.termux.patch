@@ -1,0 +1,13 @@
+--- a/Makefile
++++ b/Makefile
+@@ -14,8 +14,8 @@ ifdef BLAS
+   ifeq ($(UNAME), Darwin)
+     CFLAGS += -DUSE_BLAS -DACCELERATE
+     LDFLAGS += -framework Accelerate
+   else
+-    CFLAGS += -DUSE_BLAS
+-    LDFLAGS += -lopenblas
++    CFLAGS += -DUSE_BLAS $(shell pkg-config --cflags openblas 2>/dev/null)
++    LDFLAGS += $(shell pkg-config --libs openblas 2>/dev/null || echo -lopenblas)
+   endif
+ endif

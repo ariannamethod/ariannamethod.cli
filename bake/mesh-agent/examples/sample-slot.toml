@@ -1,0 +1,19 @@
+[slot]
+id = "echo/hello"
+description = "Trivial echo slot — used for mesh-agent smoke tests"
+exec = "echo hello from mesh-agent"
+async = false
+args_schema = "[]"
+output = "stdout text"
+
+[requires]
+ram = "10MB"
+disk = "0"
+gpu = false
+
+[provides]
+streaming_metrics = ""
+
+[ownership]
+arch = ["aarch64", "x86_64"]
+os = ["linux", "darwin", "android"]

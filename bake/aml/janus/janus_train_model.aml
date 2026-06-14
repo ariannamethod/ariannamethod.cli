@@ -1,0 +1,139 @@
+# janus_train_model.aml — Scaled-up Janus for byte-level training
+# Called repeatedly by janus_train.c (C host) via persistent globals.
+#
+# C host provides via am_set_var_array:
+#   tokens  — array[T] of byte values 0-255
+#   targets — array[T] of byte values 0-255
+#
+# C host reads via am_get_var_float:
+#   loss — scalar training loss
+#
+# Weights persist across calls via am_persistent_mode(1).
+# First call: init weights. Subsequent calls: forward + backward + update.
+
+# ── Hyperparameters (set by C host as floats, read here) ──
+# These must be set before first call:
+#   n_embd, n_heads, n_layer, vocab_size, seq_len, lr
+
+# ── Forward pass: one transformer step ──
+
+TAPE START
+
+# Register all parameters
+TAPE PARAM wte
+TAPE PARAM wpe
+
+# Layer 0
+TAPE PARAM wq0
+TAPE PARAM wk0
+TAPE PARAM wv0
+TAPE PARAM wo0
+TAPE PARAM w1_0
+TAPE PARAM w3_0
+TAPE PARAM w2_0
+
+# Layer 1
+TAPE PARAM wq1
+TAPE PARAM wk1
+TAPE PARAM wv1
+TAPE PARAM wo1
+TAPE PARAM w1_1
+TAPE PARAM w3_1
+TAPE PARAM w2_1
+
+# Layer 2
+TAPE PARAM wq2
+TAPE PARAM wk2
+TAPE PARAM wv2
+TAPE PARAM wo2
+TAPE PARAM w1_2
+TAPE PARAM w3_2
+TAPE PARAM w2_2
+
+# Layer 3
+TAPE PARAM wq3
+TAPE PARAM wk3
+TAPE PARAM wv3
+TAPE PARAM wo3
+TAPE PARAM w1_3
+TAPE PARAM w3_3
+TAPE PARAM w2_3
+
+TAPE PARAM lm_head
+
+# ── Embed ──
+h = seq_embed(wte, wpe, tokens, seq_len)
+
+# ── Layer 0 ──
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+q = seq_matvec(wq0, h_norm, seq_len)
+k = seq_matvec(wk0, h_norm, seq_len)
+v = seq_matvec(wv0, h_norm, seq_len)
+attn_out = multi_head_attention(q, k, v, seq_len, n_embd, n_heads)
+attn_proj = seq_matvec(wo0, attn_out, seq_len)
+h = add(h, attn_proj)
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+gate_pre = seq_matvec(w1_0, h_norm, seq_len)
+gate = silu(gate_pre)
+up = seq_matvec(w3_0, h_norm, seq_len)
+mlp_out = mul(gate, up)
+mlp_proj = seq_matvec(w2_0, mlp_out, seq_len)
+h = add(h, mlp_proj)
+
+# ── Layer 1 ──
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+q = seq_matvec(wq1, h_norm, seq_len)
+k = seq_matvec(wk1, h_norm, seq_len)
+v = seq_matvec(wv1, h_norm, seq_len)
+attn_out = multi_head_attention(q, k, v, seq_len, n_embd, n_heads)
+attn_proj = seq_matvec(wo1, attn_out, seq_len)
+h = add(h, attn_proj)
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+gate_pre = seq_matvec(w1_1, h_norm, seq_len)
+gate = silu(gate_pre)
+up = seq_matvec(w3_1, h_norm, seq_len)
+mlp_out = mul(gate, up)
+mlp_proj = seq_matvec(w2_1, mlp_out, seq_len)
+h = add(h, mlp_proj)
+
+# ── Layer 2 ──
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+q = seq_matvec(wq2, h_norm, seq_len)
+k = seq_matvec(wk2, h_norm, seq_len)
+v = seq_matvec(wv2, h_norm, seq_len)
+attn_out = multi_head_attention(q, k, v, seq_len, n_embd, n_heads)
+attn_proj = seq_matvec(wo2, attn_out, seq_len)
+h = add(h, attn_proj)
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+gate_pre = seq_matvec(w1_2, h_norm, seq_len)
+gate = silu(gate_pre)
+up = seq_matvec(w3_2, h_norm, seq_len)
+mlp_out = mul(gate, up)
+mlp_proj = seq_matvec(w2_2, mlp_out, seq_len)
+h = add(h, mlp_proj)
+
+# ── Layer 3 ──
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+q = seq_matvec(wq3, h_norm, seq_len)
+k = seq_matvec(wk3, h_norm, seq_len)
+v = seq_matvec(wv3, h_norm, seq_len)
+attn_out = multi_head_attention(q, k, v, seq_len, n_embd, n_heads)
+attn_proj = seq_matvec(wo3, attn_out, seq_len)
+h = add(h, attn_proj)
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+gate_pre = seq_matvec(w1_3, h_norm, seq_len)
+gate = silu(gate_pre)
+up = seq_matvec(w3_3, h_norm, seq_len)
+mlp_out = mul(gate, up)
+mlp_proj = seq_matvec(w2_3, mlp_out, seq_len)
+h = add(h, mlp_proj)
+
+# ── Output head ──
+h_norm = seq_rmsnorm(h, seq_len, n_embd)
+logits = seq_matvec(lm_head, h_norm, seq_len)
+
+# ── Loss + backward + update ──
+loss = seq_cross_entropy(logits, targets, seq_len, vocab_size)
+TAPE BACKWARD loss
+TAPE ADAM_STEP lr
+TAPE CLEAR

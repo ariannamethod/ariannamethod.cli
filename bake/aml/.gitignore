@@ -1,0 +1,24 @@
+*.o
+*.a
+*.dylib
+*.so
+.DS_Store
+core/test_aml
+core/test_aml_asan
+core/test_aml_asan.dSYM/
+janus_train
+test_aml
+runner/aml
+tools/amlc
+janus_ckpt_step*.bin
+
+# LaTeX artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+*.fdb_latexmk
+*.fls

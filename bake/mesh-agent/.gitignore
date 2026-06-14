@@ -1,0 +1,5 @@
+mesh-agent
+mesh-agent-*
+*.pid
+*.log
+.DS_Store

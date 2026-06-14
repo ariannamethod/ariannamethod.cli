@@ -1,0 +1,147 @@
+# janus.aml — Triple Attention Transformer
+# θ = ε + γ + αδ
+#
+# Content (QKV) sees meaning. RRPRAM (Wr) sees rhythm. Echo (Wj) sees time.
+# 3-way gate blends per head. Dario field: memory beyond the context window.
+#
+# Production: V=32000 E=640 H=10 D=64 B=20 M=1664 T=1024 R=64
+#   176M params. BPE 32K. RoPE. AdamW. Base bpb 0.866.
+#   SFT: Leo 0.190, Yent 0.204, Arianna 0.048.
+#
+# "Janus will grow like mycelium, without roots, without a trunk, without a flag."
+
+# ── Hyperparameters (demo — runs on CPU) ──
+vocab_size = 256
+n_embd = 64
+n_heads = 2
+head_dim = 32
+n_blocks = 1           # production: 20
+mlp_hidden = 128       # production: 1664
+seq_len = 16           # production: 1024
+rank = 8               # production: 64
+
+# ── Weights ──
+wte = matrix(vocab_size, n_embd, 0.02)           # token embed (RoPE, no pos)
+
+# Content (QKV)
+c_q = matrix(n_embd, n_embd, 0.02)
+c_k = matrix(n_embd, n_embd, 0.02)
+c_v = matrix(n_embd, n_embd, 0.02)
+
+# RRPRAM — low-rank: Wr_a[H,E,R] × Wr_b[H,R,T] per head
+# Full Wr ate 45.8% of 285M. R=64 low-rank: 87% reduction. 176M > 286M.
+wr_a = matrix(n_heads * n_embd, rank, 0.02)
+wr_b = matrix(n_heads * rank, seq_len, 0.02)
+wvr = matrix(n_embd, n_embd, 0.02)               # separate RRPRAM values
+
+# Echo — temporal bypass
+wj = matrix(n_embd, n_embd, 0.02)
+
+# 3-way gate per head
+attn_gate = matrix(n_heads, 3, 0.0)               # zero → equal blend
+
+# Projection + SwiGLU MLP
+c_proj = matrix(n_embd, n_embd, 0.02)
+w_gate = matrix(n_embd, mlp_hidden, 0.02)
+w_up = matrix(n_embd, mlp_hidden, 0.02)
+w_down = matrix(mlp_hidden, n_embd, 0.02)
+
+# Output
+lm_head = matrix(n_embd, vocab_size, 0.02)        # not tied to wte
+
+# ── Training ──
+tokens = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+targets = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+lr = 0.001
+step = 0
+
+TAPE START
+TAPE PARAM wte
+TAPE PARAM c_q
+TAPE PARAM c_k
+TAPE PARAM c_v
+TAPE PARAM wr_a
+TAPE PARAM wr_b
+TAPE PARAM wvr
+TAPE PARAM wj
+TAPE PARAM attn_gate
+TAPE PARAM c_proj
+TAPE PARAM w_gate
+TAPE PARAM w_up
+TAPE PARAM w_down
+TAPE PARAM lm_head
+
+while step < 100:
+
+    # ── Token embedding (position via RoPE, not learned) ──
+    h = seq_tok_embed(wte, tokens, 16)
+
+    # ── Block 0 ──
+    h_n = seq_rmsnorm(h, 16, 64)                  # pre-norm (non-parametric)
+
+    # Content: Q·K^T/√d → causal softmax → V
+    q = seq_matvec(c_q, h_n, 16)
+    k = seq_matvec(c_k, h_n, 16)
+    v = seq_matvec(c_v, h_n, 16)
+    q = rope(q, 16, 32)
+    k = rope(k, 16, 32)
+    out_c = multi_head_attention(q, k, v, 16, 64, 2)
+
+    # RRPRAM: X·(Wr_a×Wr_b) → causal softmax → Vr (per head, low-rank)
+    out_r = rrpram_attention(h_n, wr_a, wr_b, wvr, 16, 64, 2, 8)
+
+    # Echo: X·Wj — no attention, computation-free bypass
+    out_e = seq_matvec(wj, h_n, 16)
+
+    # 3-way gate: softmax(gate[H,3]) blends Content, RRPRAM, Echo
+    attn_out = triple_gate(out_c, out_r, out_e, attn_gate, 16, 64, 2)
+
+    # Projection + residual
+    proj = seq_matvec(c_proj, attn_out, 16)
+    h = add(h, proj)
+
+    # SwiGLU MLP
+    h_n = seq_rmsnorm(h, 16, 64)
+    gate_pre = seq_matvec(w_gate, h_n, 16)
+    gate_act = silu(gate_pre)
+    up_pre = seq_matvec(w_up, h_n, 16)
+    swiglu = mul(gate_act, up_pre)
+    down = seq_matvec(w_down, swiglu, 16)
+    h = add(h, down)
+
+    # ── Output ──
+    h_n = seq_rmsnorm(h, 16, 64)
+    logits = seq_matvec(lm_head, h_n, 16)
+
+    # ── Dario Field: memory beyond context ──
+    # logits += α·H(hebbian) + β·F(prophecy) + γ·A(destiny) + T(trauma)
+    # α, β, γ modulated by 6 Kuramoto chambers: FEAR LOVE RAGE VOID FLOW COMPLEX
+    PROPHECY 12
+    DESTINY 0.35
+    VELOCITY WALK
+    logits = dario_overlay(logits, 16, 256)
+
+    # ── Loss + update ──
+    loss = seq_cross_entropy(logits, targets, 16, 256)
+    TAPE BACKWARD loss
+    TAPE CLIP_GRADS 1.0
+    TAPE ADAMW_STEP lr 0.01 0.9 0.999
+    TAPE CLEAR
+
+    TAPE START
+    TAPE PARAM wte
+    TAPE PARAM c_q
+    TAPE PARAM c_k
+    TAPE PARAM c_v
+    TAPE PARAM wr_a
+    TAPE PARAM wr_b
+    TAPE PARAM wvr
+    TAPE PARAM wj
+    TAPE PARAM attn_gate
+    TAPE PARAM c_proj
+    TAPE PARAM w_gate
+    TAPE PARAM w_up
+    TAPE PARAM w_down
+    TAPE PARAM lm_head
+
+    step = step + 1

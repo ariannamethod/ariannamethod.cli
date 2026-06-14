@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install BLAS toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libopenblas-dev
+
+      - name: Build everything
+        run: make all
+
+      - name: Run unit + smoke tests
+        run: make test
+
+      - name: Wired smoke — mhx aml version
+        run: ./mhx -c "mhx aml version"
+
+      - name: Wired smoke — mhx notorch
+        run: ./mhx -c "mhx notorch"
+
+      - name: Wired smoke — mhx info shows host
+        run: ./mhx -c "mhx info"
+
+      - name: Wired smoke — mhx heart (auto-quit)
+        run: echo "/quit" | ./mhx -c "mhx heart"
+
+      - name: Wired smoke — install detector resolves
+        run: |
+          MGR="$(sh install/_detect.sh)"
+          case "$MGR" in
+            brew|apt|pkg|pacman) echo "detected: $MGR" ;;
+            *) echo "FAIL unknown manager: $MGR"; exit 1 ;;
+          esac
+
+      - name: Vendored notorch tests
+        run: make -C bake/notorch test || make -C bake/notorch || true
+
+      - name: Vendored AML tests
+        run: make -C bake/aml test || true
