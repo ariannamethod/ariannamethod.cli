@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Go (mesh-agent build)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: bake/mesh-agent/go.mod
+
       - name: Install BLAS toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
