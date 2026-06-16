@@ -240,20 +240,40 @@ int mhx_readline(char *buf, size_t size)
     return (int)n;
 }
 
-/* ---- argv split (whitespace, no quoting yet) --------------------------- */
+/* ---- argv split (whitespace; '' and "" quoting) ----------------------- */
 
 #define MHX_MAX_ARGV 64
 
+/* Splits `line` into argv in place. Unquoted runs break on whitespace;
+ * single or double quotes group a run (inner whitespace kept, the quote
+ * chars stripped). Each token is compacted in place — the write pointer
+ * never passes the read pointer, so a token never clobbers unread input.
+ * POSIX-ish; no backslash escapes. */
 static int split_argv(char *line, char **argv)
 {
     int argc = 0;
-    char *p = line;
-    while (*p && argc < MHX_MAX_ARGV - 1) {
-        while (*p && isspace((unsigned char)*p)) p++;
-        if (!*p) break;
-        argv[argc++] = p;
-        while (*p && !isspace((unsigned char)*p)) p++;
-        if (*p) { *p = '\0'; p++; }
+    char *r = line;
+    while (*r && argc < MHX_MAX_ARGV - 1) {
+        while (*r && isspace((unsigned char)*r)) r++;
+        if (!*r) break;
+        char *w = r;
+        argv[argc++] = w;
+        char quote = 0;
+        while (*r) {
+            char c = *r;
+            if (quote) {
+                if (c == quote) { quote = 0; r++; continue; }
+                *w++ = c; r++;
+            } else if (c == '\'' || c == '"') {
+                quote = c; r++;
+            } else if (isspace((unsigned char)c)) {
+                break;
+            } else {
+                *w++ = c; r++;
+            }
+        }
+        if (*r) r++;
+        *w = '\0';
     }
     argv[argc] = NULL;
     return argc;
