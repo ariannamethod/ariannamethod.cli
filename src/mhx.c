@@ -290,6 +290,9 @@ static mhx_status builtin_help(int argc, char **argv)
         "                                 via host pkg manager\n"
         "  mhx train nanollama <tokens>   run examples/nanollama trainer\n"
         "                                 with any extra nanollama flags\n"
+        "  mhx infer <model.gguf> [prompt [max_tokens [temp]]]\n"
+        "                                 local GGUF inference (LLaMA/Qwen/\n"
+        "                                 Mistral/SmolLM2; GGUF-BPE tokenizer)\n"
         "  mhx slots                      list orchestrated slots/models\n"
         "  mhx slots show <slot>          inspect one slot target/state\n"
         "  mhx slots run <slot> [args...] run a wired slot target\n"
@@ -658,6 +661,61 @@ static mhx_status builtin_train(int argc, char **argv)
     return MHX_BAD_ARGS;
 }
 
+static mhx_status builtin_infer(int argc, char **argv)
+{
+    char makefile_path[PATH_MAX];
+    char bin_path[PATH_MAX];
+    char cwd[PATH_MAX];
+    char *child_argv[MHX_MAX_ARGV + 1];
+    int j = 0;
+    int rc;
+    if (argc < 3 || strcmp(argv[2], "--help") == 0 || strcmp(argv[2], "-h") == 0) {
+        puts("mhx infer <model.gguf> [prompt] [max_tokens] [temp]");
+        puts("  builds bake/notorch/infer_llama on demand, then runs local GGUF");
+        puts("  inference (LLaMA/Qwen/Mistral/SmolLM2 arch; GGUF-embedded BPE");
+        puts("  tokenizer, byte-level fallback for char models).");
+        puts("");
+        puts("examples:");
+        puts("  mhx infer model.gguf \"Once upon a time\"");
+        puts("  mhx infer model.gguf \"The capital of France is\" 40 0.8");
+        return argc < 3 ? MHX_BAD_ARGS : MHX_OK;
+    }
+    if (mhx_path_join(makefile_path, sizeof(makefile_path),
+                      g_mhx_root[0] ? g_mhx_root : ".",
+                      "bake/notorch/Makefile") != 0 ||
+        mhx_path_join(bin_path, sizeof(bin_path),
+                      g_mhx_root[0] ? g_mhx_root : ".",
+                      "bake/notorch/infer_llama") != 0) {
+        return MHX_HOST_FAIL;
+    }
+    if (access(bin_path, X_OK) != 0) {
+        if (access(makefile_path, R_OK) != 0) {
+            fprintf(stderr, "mhx infer: missing bake/notorch build files\n");
+            return MHX_HOST_FAIL;
+        }
+        if (!getcwd(cwd, sizeof(cwd))) return MHX_HOST_FAIL;
+        if (chdir(g_mhx_root[0] ? g_mhx_root : ".") != 0) {
+            fprintf(stderr, "mhx infer: chdir failed: %s\n", strerror(errno));
+            return MHX_HOST_FAIL;
+        }
+        rc = system("make -C bake/notorch llama");
+        (void)chdir(cwd);
+        if (!(WIFEXITED(rc) && WEXITSTATUS(rc) == 0)) {
+            fprintf(stderr, "mhx infer: build failed\n");
+            return MHX_HOST_FAIL;
+        }
+    }
+    child_argv[j++] = (char *)"infer_llama";
+    for (int i = 2; i < argc && j < MHX_MAX_ARGV; i++) {
+        child_argv[j++] = argv[i];
+    }
+    child_argv[j] = NULL;
+    rc = mhx_spawn_path(bin_path, child_argv);
+    if (rc < 0) return MHX_HOST_FAIL;
+    if (rc != 0) return MHX_BAD_ARGS;
+    return MHX_OK;
+}
+
 static mhx_status builtin_slots(int argc, char **argv)
 {
     mhx_slot slots[32];
@@ -963,6 +1021,7 @@ mhx_status mhx_run_builtin(int argc, char **argv)
     if (strcmp(verb, "notorch") == 0) return builtin_notorch(argc, argv);
     if (strcmp(verb, "install") == 0) return builtin_install(argc, argv);
     if (strcmp(verb, "train") == 0)   return builtin_train(argc, argv);
+    if (strcmp(verb, "infer") == 0)   return builtin_infer(argc, argv);
     if (strcmp(verb, "slots") == 0)   return builtin_slots(argc, argv);
     if (strcmp(verb, "mesh") == 0)    return builtin_mesh(argc, argv);
 
