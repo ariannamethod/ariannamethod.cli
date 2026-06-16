@@ -319,14 +319,9 @@ static mhx_status builtin_help(int argc, char **argv)
         "  mhx mesh                       cross-node messaging status\n"
         "  mhx mesh peers                 list discovered peers\n"
         "  mhx mesh status [PEER]         /presence of local agent or PEER\n"
-        "  mhx mesh send <peer|@all|@TAG> TEXT  unicast/broadcast/multicast TEXT\n"
+        "  mhx mesh send <peer|@all> TEXT unicast, or @all to broadcast\n"
         "  mhx mesh listen [flags]        tail ~/.mesh/inbox chronologically\n"
         "                                 flags: --since DURATION, --watch\n"
-        "  mhx mesh ask <peer|@all|@TAG> TEXT  send, then collect replies\n"
-        "  mhx mesh tags <list|show|add|rm|del>  manage tag selectors\n"
-        "  mhx mesh inbox <count|show|dump|clear|archive>  inbox admin\n"
-        "  mhx mesh selfcheck                local readiness check\n"
-        "                                 flag: --timeout DURATION (default 60s)\n"
         "  exit | quit                    leave the REPL\n"
         "\n"
         "anything else is forwarded to the host shell.\n");
@@ -841,12 +836,7 @@ static mhx_status builtin_mesh(int argc, char **argv)
                "  mhx mesh status [PEER]               /presence of local agent (or PEER)\n"
                "  mhx mesh send <peer> TEXT...         POST /msg to one peer\n"
                "  mhx mesh send @all TEXT...           broadcast to every peer except self\n"
-               "  mhx mesh send @TAG TEXT...           broadcast to peers in tag (see tags)\n"
-               "  mhx mesh listen [--since D] [--watch] tail ~/.mesh/inbox chronologically\n"
-               "  mhx mesh ask <peer|@all|@TAG> TEXT... [--timeout D]  send + collect replies\n"
-               "  mhx mesh tags <list|show|add|rm|del> ...  manage ~/.mesh/tags.json\n"
-               "  mhx mesh inbox <count|show|dump|clear|archive> ...  inbox admin\n"
-               "  mhx mesh selfcheck                   local readiness check (PASS/WARN/FAIL rows)\n",
+               "  mhx mesh listen [--since D] [--watch] tail ~/.mesh/inbox chronologically\n",
                has_bin ? "built" : "not built — run 'make -C bake/mesh-agent'");
         return MHX_OK;
     }
@@ -901,29 +891,26 @@ static mhx_status builtin_mesh(int argc, char **argv)
     if (strcmp(sub, "send") == 0) {
         if (argc < 5) {
             fprintf(stderr,
-                "mhx mesh send: usage 'mhx mesh send <peer|@all|@TAG> TEXT...'\n");
+                "mhx mesh send: usage 'mhx mesh send <peer|@all> TEXT...'\n");
             return MHX_BAD_ARGS;
         }
         const char *target = argv[3];
         int broadcast_all = (strcmp(target, "@all") == 0);
-        int is_tag = (target[0] == '@' && !broadcast_all);
-        /* @all  → mesh-agent broadcast TEXT...
-         * @TAG  → mesh-agent broadcast @TAG TEXT...
-         * PEER  → mesh-agent send PEER TEXT... */
+        if (!broadcast_all && target[0] == '@') {
+            fprintf(stderr,
+                "mhx mesh send: tag targets (@TAG) are not supported here; "
+                "use a peer name or @all\n");
+            return MHX_BAD_ARGS;
+        }
+        /* @all → mesh-agent broadcast TEXT...; PEER → mesh-agent send PEER TEXT... */
         int extra = argc - 4;
-        int n;
-        if (broadcast_all)  n = 2 + extra + 1;
-        else if (is_tag)    n = 3 + extra + 1;
-        else                n = 3 + extra + 1;
+        int n = (broadcast_all ? 2 : 3) + extra + 1;
         char **cargv = (char **)calloc((size_t)n, sizeof(char *));
         if (!cargv) return MHX_HOST_FAIL;
         int j = 0;
         cargv[j++] = (char *)"mesh-agent";
         if (broadcast_all) {
             cargv[j++] = (char *)"broadcast";
-        } else if (is_tag) {
-            cargv[j++] = (char *)"broadcast";
-            cargv[j++] = (char *)target;
         } else {
             cargv[j++] = (char *)"send";
             cargv[j++] = (char *)target;
@@ -940,84 +927,9 @@ static mhx_status builtin_mesh(int argc, char **argv)
         return rc == 0 ? MHX_OK : MHX_HOST_FAIL;
     }
 
-    if (strcmp(sub, "tags") == 0) {
-        /* mhx mesh tags <list|show|add|rm|del> ... — pass-through */
-        int extra = argc - 3;
-        int n = 2 + extra + 1;
-        char **cargv = (char **)calloc((size_t)n, sizeof(char *));
-        if (!cargv) return MHX_HOST_FAIL;
-        int j = 0;
-        cargv[j++] = (char *)"mesh-agent";
-        cargv[j++] = (char *)"tags";
-        for (int i = 3; i < argc; i++) cargv[j++] = argv[i];
-        cargv[j] = NULL;
-        int rc = mhx_spawn_baked("mesh-agent/mesh-agent", cargv);
-        free(cargv);
-        if (rc < 0) {
-            fprintf(stderr,
-                "mhx mesh: build it first with 'make -C bake/mesh-agent'\n");
-            return MHX_HOST_FAIL;
-        }
-        return rc == 0 ? MHX_OK : MHX_HOST_FAIL;
-    }
-
-    if (strcmp(sub, "inbox") == 0) {
-        /* mhx mesh inbox <count|show|dump|clear|archive> ... — pass-through */
-        int extra = argc - 3;
-        int n = 2 + extra + 1;
-        char **cargv = (char **)calloc((size_t)n, sizeof(char *));
-        if (!cargv) return MHX_HOST_FAIL;
-        int j = 0;
-        cargv[j++] = (char *)"mesh-agent";
-        cargv[j++] = (char *)"inbox";
-        for (int i = 3; i < argc; i++) cargv[j++] = argv[i];
-        cargv[j] = NULL;
-        int rc = mhx_spawn_baked("mesh-agent/mesh-agent", cargv);
-        free(cargv);
-        if (rc < 0) {
-            fprintf(stderr,
-                "mhx mesh: build it first with 'make -C bake/mesh-agent'\n");
-            return MHX_HOST_FAIL;
-        }
-        return rc == 0 ? MHX_OK : MHX_HOST_FAIL;
-    }
-
-    if (strcmp(sub, "selfcheck") == 0) {
-        /* mhx mesh selfcheck — local node readiness check, pass-through */
-        char *cargv[] = { (char *)"mesh-agent", (char *)"selfcheck", NULL };
-        int rc = mhx_spawn_baked("mesh-agent/mesh-agent", cargv);
-        if (rc < 0) {
-            fprintf(stderr,
-                "mhx mesh: build it first with 'make -C bake/mesh-agent'\n");
-            return MHX_HOST_FAIL;
-        }
-        return rc == 0 ? MHX_OK : MHX_HOST_FAIL;
-    }
-
-    if (strcmp(sub, "ask") == 0) {
-        /* mhx mesh ask <peer|@all> TEXT... [--timeout D] — pass-through */
-        int extra = argc - 3;
-        int n = 2 + extra + 1;
-        char **cargv = (char **)calloc((size_t)n, sizeof(char *));
-        if (!cargv) return MHX_HOST_FAIL;
-        int j = 0;
-        cargv[j++] = (char *)"mesh-agent";
-        cargv[j++] = (char *)"ask";
-        for (int i = 3; i < argc; i++) cargv[j++] = argv[i];
-        cargv[j] = NULL;
-        int rc = mhx_spawn_baked("mesh-agent/mesh-agent", cargv);
-        free(cargv);
-        if (rc < 0) {
-            fprintf(stderr,
-                "mhx mesh: build it first with 'make -C bake/mesh-agent'\n");
-            return MHX_HOST_FAIL;
-        }
-        return rc == 0 ? MHX_OK : MHX_HOST_FAIL;
-    }
-
     fprintf(stderr,
         "mhx mesh: unknown subverb '%s' "
-        "(peers|status|send|listen|ask|tags|inbox|selfcheck)\n", sub);
+        "(peers|status|send|listen)\n", sub);
     return MHX_BAD_ARGS;
 }
 

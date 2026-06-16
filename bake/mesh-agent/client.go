@@ -340,18 +340,3 @@ func listenScan(dir string, sinceDur time.Duration, shown map[string]bool) int {
 	}
 	return len(items)
 }
-
-// postMsg POSTs a {from,to,body} message to a peer's /msg endpoint.
-func postMsg(addr, from, to, text string) error {
-	body, _ := json.Marshal(map[string]any{"from": from, "to": to, "body": text})
-	c := &http.Client{Timeout: 5 * time.Second}
-	resp, err := c.Post("http://"+addr+"/msg", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("status %d", resp.StatusCode)
-	}
-	return nil
-}
