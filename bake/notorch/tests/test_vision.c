@@ -300,6 +300,72 @@ static void test_bpe(void) {
     ASSERT(n2 == 0, "bpe encode empty = 0 tokens");
 }
 
+static void test_conv2d(void) {
+    printf("\n-- conv2d (im2col + GEMM) --\n");
+    // 1ch 3x3 input, one 2x2 all-ones kernel, stride 1, pad 0 -> 2x2 window sums.
+    float in[9]  = {1,2,3, 4,5,6, 7,8,9};
+    float w[4]   = {1,1,1,1};
+    float out[4] = {0};
+    int rc = nt_conv2d(out, in, w, NULL, 1, 3, 3, 1, 2, 2, 1, 0);
+    ASSERT(rc == 0, "nt_conv2d returns 0");
+    ASSERT_NEAR(out[0], 12.0f, 1e-4f, "conv out[0,0] = 1+2+4+5 = 12");
+    ASSERT_NEAR(out[1], 16.0f, 1e-4f, "conv out[0,1] = 2+3+5+6 = 16");
+    ASSERT_NEAR(out[2], 24.0f, 1e-4f, "conv out[1,0] = 4+5+7+8 = 24");
+    ASSERT_NEAR(out[3], 28.0f, 1e-4f, "conv out[1,1] = 5+6+8+9 = 28");
+    float bias[1] = {10.0f};
+    nt_conv2d(out, in, w, bias, 1, 3, 3, 1, 2, 2, 1, 0);
+    ASSERT_NEAR(out[0], 22.0f, 1e-4f, "conv + bias 10 -> out[0,0] = 22");
+}
+
+static void test_group_norm(void) {
+    printf("\n-- group_norm --\n");
+    // 2 channels (1x2 each), 2 groups -> each channel normalised to {-1,+1}.
+    float in[4]  = {1,2, 3,4};   // ch0 = [1,2], ch1 = [3,4]
+    float out[4] = {0};
+    int rc = nt_group_norm(out, in, NULL, NULL, 2, 1, 2, 2, 1e-5f);
+    ASSERT(rc == 0, "nt_group_norm returns 0");
+    ASSERT_NEAR(out[0], -1.0f, 1e-3f, "gn 2grp ch0[0] ~ -1");
+    ASSERT_NEAR(out[1],  1.0f, 1e-3f, "gn 2grp ch0[1] ~ +1");
+    ASSERT_NEAR(out[2], -1.0f, 1e-3f, "gn 2grp ch1[0] ~ -1");
+    ASSERT_NEAR(out[3],  1.0f, 1e-3f, "gn 2grp ch1[1] ~ +1");
+    // one group over [1,2,3,4] (mean 2.5, std ~1.118), affine gamma=2 beta=1.
+    float gamma[2] = {2.0f, 2.0f}, beta[2] = {1.0f, 1.0f};
+    nt_group_norm(out, in, gamma, beta, 2, 1, 2, 1, 1e-5f);
+    ASSERT_NEAR(out[0], -1.6833f, 2e-3f, "gn 1grp affine [0] = -1.683");
+    ASSERT_NEAR(out[3],  3.6833f, 2e-3f, "gn 1grp affine [3] =  3.683");
+}
+
+static void test_upsample(void) {
+    printf("\n-- upsample (nearest) --\n");
+    float in[4]  = {1,2, 3,4};        // 1ch 2x2
+    float out[16] = {0};
+    nt_upsample_nearest(out, in, 1, 2, 2, 2);  // -> 4x4, each pixel duplicated 2x2
+    ASSERT_NEAR(out[0],  1.0f, 1e-6f, "up[0,0] = 1");
+    ASSERT_NEAR(out[3],  2.0f, 1e-6f, "up[0,3] = 2");
+    ASSERT_NEAR(out[5],  1.0f, 1e-6f, "up[1,1] = 1");
+    ASSERT_NEAR(out[8],  3.0f, 1e-6f, "up[2,0] = 3");
+    ASSERT_NEAR(out[15], 4.0f, 1e-6f, "up[3,3] = 4");
+}
+
+static void test_attention(void) {
+    printf("\n-- attention (scaled dot-product) --\n");
+    // self-attn T=S=2, d=2; Q=K=identity -> softmax(I/sqrt2) @ V.
+    float Q[4] = {1,0, 0,1}, K[4] = {1,0, 0,1}, V[4] = {1,2, 3,4};
+    float out[4] = {0};
+    int rc = nt_attention(out, Q, K, V, 2, 2, 2);
+    ASSERT(rc == 0, "nt_attention returns 0");
+    ASSERT_NEAR(out[0], 1.6605f, 5e-3f, "attn out[0,0]");
+    ASSERT_NEAR(out[1], 2.6605f, 5e-3f, "attn out[0,1]");
+    ASSERT_NEAR(out[2], 2.3395f, 5e-3f, "attn out[1,0]");
+    ASSERT_NEAR(out[3], 3.3395f, 5e-3f, "attn out[1,1]");
+    // cross-attn T=1, S=2 (context) -> the conditioning path.
+    float Qc[2] = {1,1}, Kc[4] = {1,1, 0,0}, Vc[4] = {10,20, 30,40};
+    float outc[2] = {0};
+    nt_attention(outc, Qc, Kc, Vc, 1, 2, 2);
+    ASSERT_NEAR(outc[0], 13.914f, 5e-2f, "cross-attn out[0]");
+    ASSERT_NEAR(outc[1], 23.914f, 5e-2f, "cross-attn out[1]");
+}
+
 int main(void) {
     printf("═══════════════════════════════════════════\n");
     printf("  notorch vision + BPE tests\n");
@@ -315,6 +381,10 @@ int main(void) {
     test_vit_preprocess();
     test_gray_preprocess();
     test_bpe();
+    test_conv2d();
+    test_group_norm();
+    test_upsample();
+    test_attention();
 
     printf("\n═══════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", n_pass, n_fail);

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
 
 // ── Reading primitives ───────────────────────────────────────────────────────
 
@@ -71,6 +72,15 @@ gguf_file* gguf_open(const char* path) {
     read_u32(f, &gf->version);
     read_u64(f, &gf->n_tensors);
     read_u64(f, &gf->n_kv);
+
+    // The tensor-info table is fixed-size. With more tensors than it holds, the
+    // info loop stops early and data_offset (computed from ftell after the loop)
+    // lands mid-header, silently corrupting every tensor read. Fail loud instead.
+    if (gf->n_tensors > GGUF_MAX_TENSORS) {
+        fprintf(stderr, "gguf: %llu tensors exceeds GGUF_MAX_TENSORS=%d (%s); refusing to load\n",
+                (unsigned long long)gf->n_tensors, GGUF_MAX_TENSORS, path);
+        fclose(f); free(gf); return NULL;
+    }
 
     // Parse metadata
     gf->n_kv_parsed = 0;
@@ -150,8 +160,13 @@ gguf_file* gguf_open(const char* path) {
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     long data_size = fsize - gf->data_offset;
-    gf->data = (uint8_t*)malloc(data_size);
-    if (!gf->data) { fclose(f); free(gf); return NULL; }
+    // Page-align the tensor block so the Metal backend can wrap it as one
+    // zero-copy NoCopy MTLBuffer (resident weights). free() stays valid.
+    size_t pg = (size_t)getpagesize();
+    size_t alloc = ((size_t)data_size + pg - 1) & ~(pg - 1);
+    gf->data = NULL;
+    if (posix_memalign((void**)&gf->data, pg, alloc) != 0 || !gf->data) { fclose(f); free(gf); return NULL; }
+    gf->data_size = (uint64_t)alloc;
     fseek(f, gf->data_offset, SEEK_SET);
     fread(gf->data, 1, data_size, f);
     fclose(f);
@@ -177,6 +192,41 @@ const gguf_kv* gguf_get_kv(const gguf_file* gf, const char* key) {
     for (int i = 0; i < gf->n_kv_parsed; i++)
         if (strcmp(gf->kv[i].key, key) == 0) return &gf->kv[i];
     return NULL;
+}
+
+// Read a GGUF type-9 array of strings (e.g. tokenizer.ggml.tokens / .merges) by key.
+// Arrays are skipped during gguf_open, so this re-scans the file. Returns a malloc'd
+// char** of *out_n strdup'd strings, or NULL if the key/array is absent. Caller frees
+// each string and the array.
+char** gguf_read_str_array(const char* path, const char* key, int* out_n) {
+    if (out_n) *out_n = 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    uint32_t magic;
+    if (!read_u32(f, &magic) || magic != GGUF_MAGIC) { fclose(f); return NULL; }
+    uint32_t version; uint64_t n_tensors, n_kv;
+    read_u32(f, &version); read_u64(f, &n_tensors); read_u64(f, &n_kv);
+    char** result = NULL;
+    for (uint64_t i = 0; i < n_kv; i++) {
+        char k[512] = {0};
+        uint32_t vtype;
+        if (!read_string(f, k, sizeof(k)) || !read_u32(f, &vtype)) break;
+        if (strcmp(k, key) == 0 && vtype == 9) {
+            uint32_t atype; uint64_t alen;
+            if (!read_u32(f, &atype) || !read_u64(f, &alen) || atype != 8) break;
+            result = (char**)calloc(alen ? alen : 1, sizeof(char*));
+            for (uint64_t j = 0; j < alen; j++) {
+                char buf[2048] = {0};
+                if (!read_string(f, buf, sizeof(buf))) break;
+                result[j] = strdup(buf);
+            }
+            if (out_n) *out_n = (int)alen;
+            break;
+        }
+        if (!skip_value(f, vtype)) break;
+    }
+    fclose(f);
+    return result;
 }
 
 // ── Dequantization ───────────────────────────────────────────────────────────
@@ -304,9 +354,44 @@ static void dequant_q5_0(const uint8_t *data, float *out, uint64_t n) {
     }
 }
 
+// On-disk byte size of a tensor with the given dtype and element count, with
+// uint64 overflow detection. n_elements comes straight from the file, so a
+// crafted GGUF could otherwise overflow the multiply and wrap to a tiny value
+// that slips through the bounds check below. Returns 0 to signal a HARD REJECT:
+// unknown dtype, n too small for a full quantized block, or a multiply that
+// would overflow. Strides match the dequant_* block layouts above.
+static uint64_t gguf_dtype_nbytes(uint32_t dtype, uint64_t n) {
+    uint64_t blocks, per;
+    switch (dtype) {
+    case GGUF_TYPE_F32:  return (n > UINT64_MAX / 4) ? 0 : n * 4;
+    case GGUF_TYPE_F16:  return (n > UINT64_MAX / 2) ? 0 : n * 2;
+    case GGUF_TYPE_Q4_0: blocks = n / 32;  per = 18;  break;
+    case GGUF_TYPE_Q5_0: blocks = n / 32;  per = 22;  break;
+    case GGUF_TYPE_Q8_0: blocks = n / 32;  per = 34;  break;
+    case GGUF_TYPE_Q4_K: blocks = n / 256; per = 144; break;
+    case GGUF_TYPE_Q6_K: blocks = n / 256; per = 210; break;
+    default: return 0;
+    }
+    if (blocks == 0 || blocks > UINT64_MAX / per) return 0;  // empty or overflow
+    return blocks * per;
+}
+
 float* gguf_dequant(const gguf_file* gf, int tensor_idx) {
     if (!gf || tensor_idx < 0 || tensor_idx >= (int)gf->n_tensors) return NULL;
     const gguf_tensor_info* ti = &gf->tensors[tensor_idx];
+    // ti->offset + on-disk byte size must fit in the data buffer, so a
+    // malformed/oversized GGUF can't drive an out-of-bounds read from here.
+    // (M-4: the offset-only guard missed a tensor starting just below the end.)
+    // nbytes == 0 is a hard reject (unknown dtype / overflow / sub-block n) — no
+    // escape hatch, so the dequant switch default is not the only guard.
+    uint64_t nbytes = gguf_dtype_nbytes(ti->dtype, ti->n_elements);
+    if (nbytes == 0 || ti->offset >= gf->data_size ||
+        nbytes > gf->data_size - ti->offset) {
+        fprintf(stderr, "gguf: tensor '%s' out of bounds/invalid (off %llu + %llu bytes, data_size %llu)\n",
+                ti->name, (unsigned long long)ti->offset, (unsigned long long)nbytes,
+                (unsigned long long)gf->data_size);
+        return NULL;
+    }
     const uint8_t* src = gf->data + ti->offset;
 
     float* dst = (float*)malloc(ti->n_elements * sizeof(float));

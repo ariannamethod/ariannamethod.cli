@@ -3,7 +3,7 @@
 
 CC = cc
 AR ?= ar
-CFLAGS = -O2 -Wall -Wextra -std=c11 -I.
+CFLAGS = -O2 -Wall -Wextra -std=c11 -pthread -I.
 
 # Detect platform
 UNAME := $(shell uname)
@@ -44,7 +44,7 @@ SIMD_LIBS  = -lpthread
 
 # ── Targets ──
 
-.PHONY: all test clean cpu gpu simd help lib install
+.PHONY: all test clean cpu gpu simd help lib install metal test_metal infer_gguf_metal
 
 all: notorch_test
 	@echo "Built with $(BLAS_NAME). Run: ./notorch_test"
@@ -171,6 +171,49 @@ train_distillation: examples/train_distillation.c notorch.c notorch.h
 test_vision: tests/test_vision.c notorch.c notorch.h notorch_vision.h stb_image.h
 	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o test_vision tests/test_vision.c notorch.c -lm $(BLAS_LIBS)
 	@echo "Compiled: test_vision (vision + BPE, $(BLAS_NAME))"
+
+# ── Apple Silicon Metal/MSL backend (Phase 1: Q4_K matvec) ──
+# Inline-dequant Q4_K matvec on the Apple GPU — the critical path for
+# 24B-class quantized models on 24GB nodes. Weights stay in their packed
+# layout; the shader streams blocks and reconstructs f32 values per
+# matvec, never materializing the 4× f32 buffer. See notorch_metal.h.
+ifeq ($(UNAME), Darwin)
+# Obj-C++ needs a C++ standard; -std=c11 is invalid for .mm. Use a
+# dedicated MM_FLAGS so the rest of notorch (pure C99/C11) keeps its
+# C dialect.
+MM_FLAGS = -O2 -Wall -Wextra -std=c++17 -I.
+
+notorch_metal.o: notorch_metal.mm notorch_metal.h
+	clang++ $(MM_FLAGS) -DUSE_METAL -fobjc-arc -c notorch_metal.mm -o notorch_metal.o
+	@echo "Compiled: notorch_metal.o (Metal/MSL, Apple Silicon)"
+
+tests/test_metal_q4k: tests/test_metal_q4k.c notorch_metal.o notorch_metal.h
+	$(CC) $(CFLAGS) -DUSE_METAL -o tests/test_metal_q4k tests/test_metal_q4k.c notorch_metal.o \
+		-framework Metal -framework Foundation -lc++ -lm
+	@echo "Compiled: tests/test_metal_q4k (Metal Q4_K correctness)"
+
+metal: tests/test_metal_q4k
+	@echo "Metal backend built. Run: make test_metal"
+
+test_metal: tests/test_metal_q4k
+	./tests/test_metal_q4k
+
+# Packed-Q4_K/Q6_K GGUF inference on Apple Metal — runs 24B-class quantized
+# models on a 24GB Mac (weights stay packed; Q4_K on the GPU, Q6_K per-block
+# on CPU cores; resident weights, no per-call upload). See examples/infer_gguf_metal.c.
+infer_gguf_metal: examples/infer_gguf_metal.c examples/bpe.c examples/bpe.h gguf.c gguf.h notorch_metal.o notorch_metal.h
+	$(CC) $(CFLAGS) -DUSE_METAL -I. -o examples/infer_gguf_metal \
+		examples/infer_gguf_metal.c examples/bpe.c gguf.c notorch_metal.o \
+		-framework Metal -framework Foundation -lc++ -lm
+	@echo "Compiled: examples/infer_gguf_metal (packed Q4_K/Q6_K GGUF inference, Apple Metal)"
+else
+metal:
+	@echo "Metal is Apple-only; this is $(UNAME). Skipping."
+test_metal:
+	@echo "Metal is Apple-only; skipping."
+infer_gguf_metal:
+	@echo "infer_gguf_metal needs Apple Metal; this is $(UNAME). Skipping."
+endif
 
 # ── Test & Clean ──
 
