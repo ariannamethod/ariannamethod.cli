@@ -1,4 +1,4 @@
-// mesh-agent — capability-broker daemon for the arianna tailnet mesh.
+// mesh-agent — capability-broker daemon for the tailnet mesh.
 //
 // Each node runs one mesh-agent process. The agent:
 //   - loads slot manifests from ~/.mesh/slots/*.toml
@@ -95,7 +95,7 @@ defaults:
   state dir          ~/.mesh
   slots dir          ~/.mesh/slots
   bind addr          first tailnet IPv4 (100.x.x.x), port 4747
-  client target      reads ~/.mesh/agent (host:port) or default neo:4747
+  client target      reads ~/.mesh/agent (host:port) or default localhost:4747
                      PEER may be host or host:port (port defaults to 4747)
 `, Version)
 }

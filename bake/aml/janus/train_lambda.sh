@@ -3,8 +3,8 @@
 # Pure Adam. No Chuck. No Python. No PyTorch.
 #
 # Usage:
-#   scp -i ~/Downloads/Janus.pem -r ariannamethod.ai/ ubuntu@<IP>:~/
-#   ssh -i ~/Downloads/Janus.pem ubuntu@<IP>
+#   scp -i ~/.ssh/lambda.pem -r ariannamethod.ai/ ubuntu@<IP>:~/
+#   ssh -i ~/.ssh/lambda.pem ubuntu@<IP>
 #   cd ~/ariannamethod.ai && bash janus/train_lambda.sh
 #
 set -euo pipefail

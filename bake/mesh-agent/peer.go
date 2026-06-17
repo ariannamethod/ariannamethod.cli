@@ -15,7 +15,7 @@ import (
 // Peer is a remote mesh-agent observed by the discovery loop.
 type Peer struct {
 	Name     string  `json:"name"`      // hostname or tailnet name
-	Addr     string  `json:"addr"`      // host:port URL base, e.g. "neo:4747"
+	Addr     string  `json:"addr"`      // host:port URL base, e.g. "host:4747"
 	LastSeen string  `json:"last_seen"` // RFC3339
 	Slots    []*Slot `json:"slots"`
 }

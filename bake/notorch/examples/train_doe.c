@@ -2,7 +2,7 @@
  * train_doe.c — Train a 9.8M LLaMA-like transformer on the unified DoE corpus
  *
  * Architecture: V=256, E=224, H=8, FFN=896, CTX=128, L=12  (char-level, byte vocab)
- * Dataset:      /Users/ataeff/DoE.aml/datasets/doe_corpus.txt (4.23 MB,
+ * Dataset:      ./doe_corpus.txt (4.23 MB,
  *               6327 dialogs in <|user|>...<|assistant|>...<|end|> form,
  *               parliament voice from doe_pure + doe_resonate + doe_addition)
  * Optimizer:    Chuck (synced with PyTorch reference)
@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
     printf("  checkpoint every %d steps\n", CKPT_EVERY);
     printf("════════════════════════════════════════════════════════\n");
 
-    const char* path = "/Users/ataeff/DoE.aml/datasets/doe_corpus.txt";
+    const char* path = "./doe_corpus.txt";
     FILE* f = fopen(path, "rb");
     if (!f) { printf("cannot open %s\n", path); return 1; }
     fseek(f, 0, SEEK_END); long fsize = ftell(f); fseek(f, 0, SEEK_SET);

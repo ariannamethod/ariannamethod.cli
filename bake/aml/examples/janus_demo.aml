@@ -12,7 +12,7 @@
 LOAD_MODEL ~/.yent/models/yent_0.5B_step1000_q4_0.gguf
 
 # ═══ Load Delta Voice (multilingual) ═══
-LOAD_DELTA ~/Downloads/operation-y/weights/yent_05b_delta_r64.npz
+LOAD_DELTA ./weights/yent_delta_r64.npz
 
 # ═══ Configure the field ═══
 PROPHECY 7

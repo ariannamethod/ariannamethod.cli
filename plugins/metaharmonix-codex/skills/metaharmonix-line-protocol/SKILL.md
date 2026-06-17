@@ -10,7 +10,7 @@ goal is to inspect or drive it through its terminal surface.
 
 ## Local assumptions
 
-- Repo root: `~/arianna-codex/repos/metaharmonix`
+- Repo root: `<metaharmonix-repo-root>`
 - Binary: `./mhx`
 - Preferred non-interactive form: `./mhx -c "<command>"`
 
